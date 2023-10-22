@@ -1,0 +1,144 @@
+---
+title: "Reds Project"
+author: "Jake Federman"
+date: "2023-10-22"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE}
+library(tidyverse)
+```
+
+```{r}
+df <- read_csv(file = "data.csv")
+```
+
+# Hypothesis
+
+Dew point affects pitches in the following ways:
+
+**Enhances downward trajectory on topspin pitches**
+
+As a result, a pitch with topspin at a high dew point might come in at a steeper approach angle than an identical pitch thrown at a low dew point. We can build a model to predict vertical approach angle from the factors that contribute to it, and attribute unexplained variance in the steeper direction to dew point.
+
+**Enhances horizontal movement on sidespin pitches**
+
+As a result, a pitch with sidespin at a high dew point might come in at a more extreme horizontal approach angle than an identical pitch thrown at a low dew point. We can build a model to predict horizontal approach angle from the factors that contribute to it, and attribute unexplained variance in the extreme direction to dew point.
+
+
+# Model for Vertical Approach Angle on topspin pitches:
+
+Vertical approach angle is a product of:
+
+* **Velocity:** The faster the pitch comes in, the less time gravity has to bring it down
+* **Vertical Release Height:** Pitches released higher will be steeper, and pitches released lower will be flatter
+* **Induced Vertical Break:** Pitches with more carry will come in at a flatter angle
+* **Pitch Location:** The higher the pitch is, the flatter it will be. The lower it is, the steeper it will be
+
+```{r}
+#Filter the dataset, only include topspin pitches (induced_vertical_break < 0)
+df_topspin <- df %>% filter(INDUCED_VERTICAL_BREAK < 0)
+#Build the model
+model_vaa_topspin <- lm(data = df_topspin, VERTICAL_APPROACH_ANGLE ~ 
+                     RELEASE_SPEED + INDUCED_VERTICAL_BREAK + 
+                     RELEASE_HEIGHT + PLATE_Z)
+
+predicted_vaa <- predict(model_vaa_topspin, newdata = df_topspin)
+
+# Calculate residuals
+residuals <- df_topspin$VERTICAL_APPROACH_ANGLE - predicted_vaa
+
+# Compute the standard deviation of the residuals
+residual_sd <- sd(residuals)
+
+# Compute z-scores for each observation
+z_scores <- residuals / residual_sd
+
+# Compute the one-tailed probability for each z-score in the direction of more negative
+probabilities <- pnorm(z_scores, lower.tail = TRUE)  # TRUE gives the left tail
+
+# Create a data frame to store the results
+results <- data.frame(
+  PID = df_topspin$PID,
+  predicted_vaa = predicted_vaa,
+  actual_vaa = df_topspin$VERTICAL_APPROACH_ANGLE,
+  prob_affected_dew_point_vert = 1 - probabilities
+)
+
+# View the results
+head(results)
+```
+
+# Model for horizontal approach angle
+
+Horizontal approach angle is a product of:
+
+* **Release Side:** Pitches released wider will approach from wider
+* **Horizontal Break:** Pitches with more horizontal movement will come in at a more extreme angle
+* **Pitch Location:** The further the pitch location from the release side, the more extreme the approach angle will be
+
+```{r}
+#Build the model
+model_haa_sidespin <- lm(data = df, HORIZONTAL_APPROACH_ANGLE ~ 
+                           RELEASE_SIDE + HORIZONTAL_BREAK + PLATE_X)
+
+predicted_haa <- predict(model_haa_sidespin, newdata = df)
+
+# Calculate residuals
+residuals_2 <- df$HORIZONTAL_APPROACH_ANGLE - predicted_haa
+
+# Compute the standard deviation of the residuals
+residual_sd_2 <- sd(residuals_2)
+
+# Compute z-scores for each observation
+z_scores_2 <- residuals_2 / residual_sd_2
+
+tail <- ifelse(df$HORIZONTAL_BREAK < 0, TRUE, FALSE)  
+  # TRUE for left tail, FALSE for right tail
+
+# Compute the one-tailed probability for each z-score based on the value of HORIZONTAL_BREAK
+probabilities_2 <- mapply(function(z, tail) pnorm(z, lower.tail = tail), z_scores_2, tail)
+
+# Create a data frame to store the results
+results_2 <- data.frame(
+  PID = df$PID,
+  predicted_haa = predicted_haa,
+  actual_haa = df$HORIZONTAL_APPROACH_ANGLE,
+  prob_affected_dew_point_horiz = 1 - probabilities_2
+)
+
+# View the results
+head(results_2)
+```
+# Final Analysis
+
+```{r}
+df <-
+  df %>% 
+  left_join(results_2, by = "PID") %>% 
+  select(PID, prob_affected_dew_point_horiz) %>% 
+  left_join(results, by = "PID") %>% 
+  mutate(prob_affected_dew_point_vert =
+           ifelse(is.na(prob_affected_dew_point_vert), 0.5, #Assign probability
+                                                            #0.5 to all pitches w/ IVB > 0
+                  prob_affected_dew_point_vert)) %>% 
+  select(PID, prob_affected_dew_point_vert, prob_affected_dew_point_horiz)
+
+```
+```{r}
+#P(pitch was affected) = = 1 - (P(not affected vertically)*P(not affected horizontally))
+df <-
+  df %>% 
+  mutate(DEWPOINT_AFFECTED = 
+           1-((1-prob_affected_dew_point_vert)*(1-prob_affected_dew_point_horiz))) %>% 
+  select(PID, DEWPOINT_AFFECTED)
+head(df)
+```
+
+```{r}
+write_csv(df, file = "submission.csv")
+```
